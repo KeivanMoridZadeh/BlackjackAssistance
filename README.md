@@ -11,11 +11,14 @@ A Python-based Blackjack Assistant that helps players make optimal decisions usi
 - Visual card tracking
 - Bust probability warnings
 - Running and true count display
+- Voice control for hands-free operation
 
 ## Requirements
 
 - Python 3.6 or higher
 - tkinter (usually comes with Python)
+- SpeechRecognition
+- PyAudio
 
 ## Installation
 
@@ -31,7 +34,13 @@ A Python-based Blackjack Assistant that helps players make optimal decisions usi
    cd PokerAssistance
    ```
 
-3. Run the application:
+3. Install required dependencies:
+
+   ```
+   pip install -r requirements.txt
+   ```
+
+4. Run the application:
 
    ```
    python blackjack_assistant_gui.py
@@ -44,6 +53,20 @@ A Python-based Blackjack Assistant that helps players make optimal decisions usi
 3. Click "Get Recommendation" for optimal play advice
 4. Use "Next Hand" to start a new hand
 5. Track dealt cards in the "Dealt/Wasted Cards" section
+
+### Voice Control
+
+The application supports voice control for adding cards to different areas:
+
+1. Click the microphone button (🎤) next to the dealer, player, or wasted cards area
+2. Speak the card value (e.g., "two", "three", "ace", etc.)
+3. The card will be automatically added to the selected area
+4. To cancel voice input, click the square button (⏹️) that appears while listening
+
+Supported voice commands include:
+- Number words: "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"
+- Face cards: "jack", "queen", "king" (all count as 10)
+- Ace: "ace" or "a"
 
 ## Strategy Components
 

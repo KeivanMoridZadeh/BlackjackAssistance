@@ -6,6 +6,8 @@ Contains classes and functions for graphical user interface with drag-and-drop f
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import re
+import speech_recognition as sr
+import threading
 
 class DraggableCard(ttk.Label):
     """A draggable card widget."""
@@ -116,9 +118,18 @@ class DropTarget(ttk.Frame):
         self.cards = []
         self.card_labels = []
         
+        # Create a header frame for the text and voice button
+        header_frame = ttk.Frame(self)
+        header_frame.pack(side="top", fill="x", pady=5)
+        
         # Create a label for the text
-        self.label = ttk.Label(self, text=text)
-        self.label.pack(side="top", pady=5)
+        self.label = ttk.Label(header_frame, text=text)
+        self.label.pack(side="left", padx=5)
+        
+        # Add a voice button
+        self.voice_button = ttk.Button(header_frame, text="🎤", width=3,
+                                     command=lambda: parent.winfo_toplevel().gui.toggle_voice_recognition(target_type, self.voice_button))
+        self.voice_button.pack(side="right", padx=5)
         
         # Create a frame for the cards
         self.cards_frame = ttk.Frame(self, width=width, height=height, relief="sunken", borderwidth=1)
@@ -229,6 +240,12 @@ class BlackjackGUI:
         # Card counts dictionary to track remaining cards
         self.card_counts = {}
         
+        # Voice recognition variables
+        self.recognizer = sr.Recognizer()
+        self.is_listening = False
+        self.current_voice_target = None
+        self.current_voice_button = None
+        
         # Create main layout frames
         self.create_layout()
         
@@ -260,15 +277,52 @@ class BlackjackGUI:
         panel = ttk.Frame(self.root)
         panel.pack(fill="x", padx=10, pady=5)
         
+        # Left frame for game controls
+        left_frame = ttk.Frame(panel)
+        left_frame.pack(side="left", fill="x", expand=True)
+        
         # Deck configuration
-        ttk.Label(panel, text="Number of decks:").pack(side="left", padx=5)
-        deck_spinner = ttk.Spinbox(panel, from_=1, to=8, width=5, textvariable=self.num_decks)
+        ttk.Label(left_frame, text="Number of decks:").pack(side="left", padx=5)
+        deck_spinner = ttk.Spinbox(left_frame, from_=1, to=8, width=5, textvariable=self.num_decks)
         deck_spinner.pack(side="left", padx=5)
         
-        ttk.Button(panel, text="Set Decks", command=self.set_decks).pack(side="left", padx=5)
-        ttk.Button(panel, text="Reset Game", command=self.reset_game).pack(side="left", padx=5)
-        ttk.Button(panel, text="Get Recommendation", command=self.get_recommendation).pack(side="left", padx=20)
-        ttk.Button(panel, text="Next Hand", command=self.next_hand).pack(side="left", padx=5)
+        ttk.Button(left_frame, text="Set Decks", command=self.set_decks).pack(side="left", padx=5)
+        ttk.Button(left_frame, text="Reset Game", command=self.reset_game).pack(side="left", padx=5)
+        ttk.Button(left_frame, text="Get Recommendation", command=self.get_recommendation).pack(side="left", padx=20)
+        ttk.Button(left_frame, text="Next Hand", command=self.next_hand).pack(side="left", padx=5)
+        
+        # Right frame for voice recognition status
+        right_frame = ttk.Frame(panel)
+        right_frame.pack(side="right", fill="x", padx=10)
+        
+        # Voice recognition status
+        self.voice_status_label = ttk.Label(right_frame, text="Voice Recognition: Click 🎤 buttons to use")
+        self.voice_status_label.pack(side="right", padx=5)
+        
+        # Create a tooltip for voice usage
+        self.create_tooltip(self.voice_status_label, 
+                          "To use voice recognition:\n"
+                          "1. Click the 🎤 button next to dealer, player, or wasted cards\n"
+                          "2. Say a card value (e.g., 'two', 'ace', etc.)\n"
+                          "3. The card will be added to the selected area")
+    
+    def create_tooltip(self, widget, text):
+        """Create a tooltip for a given widget."""
+        def show_tooltip(event):
+            tooltip = tk.Toplevel(widget)
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            label = ttk.Label(tooltip, text=text, justify="left",
+                            background="#ffffe0", relief="solid", borderwidth=1)
+            label.pack()
+            widget.tooltip = tooltip
+            
+        def hide_tooltip(event):
+            if hasattr(widget, "tooltip"):
+                widget.tooltip.destroy()
+                
+        widget.bind("<Enter>", show_tooltip)
+        widget.bind("<Leave>", hide_tooltip)
     
     def create_workspace(self):
         """Create the main workspace with drop targets and card source."""
@@ -767,4 +821,161 @@ class BlackjackGUI:
         self.recommendation_text.config(state="disabled")
         
         # Update card counts
-        self.update_counts() 
+        self.update_counts()
+    
+    def reset_target_labels(self):
+        """Reset the labels of all drop targets after voice recognition is done."""
+        self.dealer_drop_target.label.config(text="Dealer's Hand (Drop Cards Here)", foreground="black")
+        self.player_drop_target.label.config(text="Your Hand (Drop Cards Here)", foreground="black")
+        self.dealt_drop_target.label.config(text="Dealt/Wasted Cards (Drop Cards Here)", foreground="black")
+        self.voice_status_label.config(text="Voice Recognition: Click 🎤 buttons to use", foreground="black")
+        
+        # Reset button appearance
+        if hasattr(self, 'current_voice_button') and self.current_voice_button:
+            self.current_voice_button.config(text="🎤")
+            self.current_voice_button = None
+    
+    def toggle_voice_recognition(self, target_type, button):
+        """
+        Toggle voice recognition for a specific target.
+        
+        Args:
+            target_type: The type of target ('dealer', 'player', or 'dealt')
+            button: The voice button associated with the target
+        """
+        if self.is_listening:
+            # Already listening, stop current session
+            self.is_listening = False
+            if hasattr(self, 'current_voice_button') and self.current_voice_button:
+                self.current_voice_button.config(text="🎤")
+            self.reset_target_labels()
+            return
+            
+        self.current_voice_target = target_type
+        self.current_voice_button = button
+        self.is_listening = True
+        
+        # Update status label
+        target_name = "Dealer" if target_type == "dealer" else "Player" if target_type == "player" else "Wasted Cards"
+        self.voice_status_label.config(text=f"Voice Recognition: Listening for {target_name}...", foreground="red")
+        
+        # Show visual indicator that voice recognition is active
+        if target_type == "dealer":
+            self.dealer_drop_target.label.config(text="Dealer's Hand (Listening...)", foreground="red")
+        elif target_type == "player":
+            self.player_drop_target.label.config(text="Your Hand (Listening...)", foreground="red")
+        else:  # dealt
+            self.dealt_drop_target.label.config(text="Dealt/Wasted Cards (Listening...)", foreground="red")
+        
+        # Change button appearance
+        button.config(text="⏹️")
+        
+        # Start voice recognition in a separate thread
+        threading.Thread(target=self.listen_for_voice_commands, daemon=True).start()
+    
+    def listen_for_voice_commands(self):
+        """Listen for voice commands and process them."""
+        try:
+            with sr.Microphone() as source:
+                # Update status and show indicator that we're adjusting for ambient noise
+                self.root.after(0, lambda: self.voice_status_label.config(
+                    text="Voice Recognition: Adjusting for ambient noise...", foreground="blue"))
+                
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                
+                # Update status to show we're ready to listen
+                target_name = "Dealer" if self.current_voice_target == "dealer" else "Player" if self.current_voice_target == "player" else "Wasted Cards"
+                self.root.after(0, lambda: self.voice_status_label.config(
+                    text=f"Voice Recognition: Listening for {target_name}...", foreground="red"))
+                
+                while self.is_listening:
+                    try:
+                        audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=3)
+                        
+                        # Show that we're processing speech
+                        self.root.after(0, lambda: self.voice_status_label.config(
+                            text="Voice Recognition: Processing speech...", foreground="orange"))
+                        
+                        text = self.recognizer.recognize_google(audio).lower()
+                        print(f"Recognized: '{text}'")  # Debug output
+                        
+                        # Process the recognized text
+                        success = self.process_voice_command(text)
+                        
+                        # Only stop listening if we successfully processed a command
+                        if success:
+                            self.is_listening = False
+                            self.root.after(1000, self.reset_target_labels)  # Reset after 1 second to show feedback
+                        
+                    except sr.WaitTimeoutError:
+                        # No speech detected within timeout
+                        continue
+                    except sr.UnknownValueError:
+                        # Speech was unintelligible
+                        self.root.after(0, lambda: self.voice_status_label.config(
+                            text="Voice Recognition: Didn't understand, try again...", foreground="orange"))
+                        continue
+                    except Exception as e:
+                        print(f"Error in voice recognition: {e}")
+                        self.is_listening = False
+                        self.root.after(0, lambda: self.reset_target_labels())
+                        
+        except Exception as e:
+            print(f"Error initializing microphone: {e}")
+            self.is_listening = False
+            # Show error in status
+            self.root.after(0, lambda: self.voice_status_label.config(
+                text=f"Voice Recognition Error: {str(e)[:30]}...", foreground="red"))
+            self.root.after(2000, self.reset_target_labels)  # Reset after 2 seconds
+    
+    def process_voice_command(self, text):
+        """
+        Process a voice command.
+        
+        Args:
+            text: The recognized text from the voice command
+        """
+        # Map spoken words to card ranks
+        card_mappings = {
+            "two": "2", "2": "2", "to": "2", "too": "2",
+            "three": "3", "3": "3", "tree": "3",
+            "four": "4", "4": "4", "for": "4",
+            "five": "5", "5": "5",
+            "six": "6", "6": "6",
+            "seven": "7", "7": "7",
+            "eight": "8", "8": "8", "ate": "8",
+            "nine": "9", "9": "9",
+            "ten": "10", "10": "10",
+            "jack": "10", "queen": "10", "king": "10",  # Face cards count as 10
+            "ace": "A", "a": "A", "as": "A", "aces": "A"
+        }
+        
+        # Find the matching card rank
+        card_rank = None
+        for word, rank in card_mappings.items():
+            if word in text:
+                card_rank = rank
+                break
+        
+        if card_rank:
+            # Show feedback that we recognized a card
+            target_name = "Dealer" if self.current_voice_target == "dealer" else "Player" if self.current_voice_target == "player" else "Wasted Cards"
+            self.root.after(0, lambda: self.voice_status_label.config(
+                text=f"Voice Recognition: Adding {card_rank} to {target_name}", foreground="green"))
+            
+            # Use the GUI thread to update the UI
+            if self.current_voice_target == "dealer":
+                self.root.after(0, lambda: self.set_dealer_card(card_rank))
+            elif self.current_voice_target == "player":
+                self.root.after(0, lambda: self.add_to_player_hand(card_rank))
+            else:  # dealt
+                self.root.after(0, lambda: self.add_to_dealt_cards(card_rank))
+        else:
+            # No card recognized
+            self.root.after(0, lambda: self.voice_status_label.config(
+                text="Voice Recognition: No valid card recognized, try again", foreground="orange"))
+            # Keep listening
+            return False
+        
+        # Successfully processed a command
+        return True 
