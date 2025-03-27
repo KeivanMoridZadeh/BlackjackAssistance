@@ -6,8 +6,13 @@ Contains classes and functions for graphical user interface with drag-and-drop f
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import re
-import speech_recognition as sr
+import json
+import queue
+import sounddevice as sd
+import numpy as np
+import vosk
 import threading
+import os
 
 class DraggableCard(ttk.Label):
     """A draggable card widget."""
@@ -102,7 +107,7 @@ class DraggableCard(ttk.Label):
 class DropTarget(ttk.Frame):
     """A drop target for cards."""
     
-    def __init__(self, parent, target_type, text, width=200, height=100):
+    def __init__(self, parent, target_type, text, width=300, height=150):
         """
         Initialize the drop target.
         
@@ -120,20 +125,20 @@ class DropTarget(ttk.Frame):
         
         # Create a header frame for the text and voice button
         header_frame = ttk.Frame(self)
-        header_frame.pack(side="top", fill="x", pady=5)
+        header_frame.pack(side="top", fill="x", pady=2)  # Reduced padding
         
         # Create a label for the text
         self.label = ttk.Label(header_frame, text=text)
-        self.label.pack(side="left", padx=5)
+        self.label.pack(side="left", padx=2)  # Reduced padding
         
         # Add a voice button
-        self.voice_button = ttk.Button(header_frame, text="🎤", width=3,
+        self.voice_button = ttk.Button(header_frame, text="🎤", width=2,  # Narrower button
                                      command=lambda: parent.winfo_toplevel().gui.toggle_voice_recognition(target_type, self.voice_button))
-        self.voice_button.pack(side="right", padx=5)
+        self.voice_button.pack(side="right", padx=2)  # Reduced padding
         
-        # Create a frame for the cards
+        # Create a frame for the cards with reduced height
         self.cards_frame = ttk.Frame(self, width=width, height=height, relief="sunken", borderwidth=1)
-        self.cards_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        self.cards_frame.pack(fill="both", expand=True, padx=2, pady=2)  # Reduced padding
         self.cards_frame.pack_propagate(False)  # Maintain specified size
 
     def can_add_card(self, rank):
@@ -162,23 +167,66 @@ class DropTarget(ttk.Frame):
             raise ValueError(f"Card not found in {self.target_type} target")
 
     def update_display(self):
-        """Update the display of cards in this target."""
+        """Update the display of cards in this target with grid layout."""
         # Clear existing card labels
         for label in self.card_labels:
             label.destroy()
         self.card_labels.clear()
         
-        # Create new card labels
-        x_offset = 0
-        for rank in self.cards:
-            label = ttk.Label(self.cards_frame, text=rank, relief="raised", borderwidth=1)
-            label.place(x=x_offset, y=5)
+        # Special handling for dealer and player
+        if self.target_type == "dealer" or self.target_type == "player":
+            # Create new card labels (horizontally aligned)
+            for i, rank in enumerate(self.cards):
+                label = ttk.Label(self.cards_frame, text=rank, relief="raised", borderwidth=1, width=2)  # Narrower label
+                label.place(x=5 + i*35, y=5)  # Reduced spacing between cards
+                self.card_labels.append(label)
+            return
+        
+        # For dealt/wasted cards only - use strict grid placement
+        # Card dimensions and spacing
+        card_width = 25  # Smaller card width
+        card_height = 22  # Smaller card height
+        h_spacing = 3  # Reduced spacing
+        v_spacing = 3  # Reduced spacing
+        left_margin = 3  # Reduced margin
+        top_margin = 3  # Reduced margin
+        
+        # Force update to get correct dimensions
+        self.cards_frame.update_idletasks()
+        frame_width = self.cards_frame.winfo_width()
+        
+        # Calculate cards per row
+        usable_width = frame_width - (2 * left_margin)
+        cards_per_row = max(1, usable_width // (card_width + h_spacing))
+        
+        # Create new card labels in grid layout
+        for i, rank in enumerate(self.cards):
+            row = i // cards_per_row
+            col = i % cards_per_row
+            
+            x = left_margin + col * (card_width + h_spacing)
+            y = top_margin + row * (card_height + v_spacing)
+            
+            label = ttk.Label(self.cards_frame, text=rank, relief="raised", borderwidth=1, width=2)  # Narrower label
+            # Place anchored at northwest (top-left)
+            label.place(x=x, y=y, anchor="nw")
             self.card_labels.append(label)
-            x_offset += 30  # Space between cards
 
     def clear(self):
         """Clear all cards from this target."""
+        # First clear any cards in the internal list
         self.cards.clear()
+        
+        # Clear card labels list
+        for label in self.card_labels:
+            label.destroy()
+        self.card_labels.clear()
+        
+        # Also destroy any direct children of the cards_frame (DraggableCards)
+        for widget in self.cards_frame.winfo_children():
+            widget.destroy()
+            
+        # Update display to ensure all cards are removed
         self.update_display()
 
 class CardCountDisplay(ttk.Frame):
@@ -188,18 +236,18 @@ class CardCountDisplay(ttk.Frame):
         """Initialize the card count display."""
         super().__init__(parent)
         
-        # Create labels for counts
-        ttk.Label(self, text="Running Count:").pack(side="left", padx=5)
-        self.running_count_label = ttk.Label(self, text="0", relief="sunken")
-        self.running_count_label.pack(side="left", padx=5)
+        # Create labels for counts with reduced text and spacing
+        ttk.Label(self, text="Run:").pack(side="left", padx=2)  # Shorter text
+        self.running_count_label = ttk.Label(self, text="0", width=3, relief="sunken")  # Narrower
+        self.running_count_label.pack(side="left", padx=2)  # Reduced padding
         
-        ttk.Label(self, text="True Count:").pack(side="left", padx=5)
-        self.true_count_label = ttk.Label(self, text="0.0", relief="sunken")
-        self.true_count_label.pack(side="left", padx=5)
+        ttk.Label(self, text="True:").pack(side="left", padx=2)  # Shorter text
+        self.true_count_label = ttk.Label(self, text="0.0", width=4, relief="sunken")  # Narrower
+        self.true_count_label.pack(side="left", padx=2)  # Reduced padding
         
-        ttk.Label(self, text="Bust Probability:").pack(side="left", padx=5)
-        self.bust_prob_label = ttk.Label(self, text="0%", relief="sunken")
-        self.bust_prob_label.pack(side="left", padx=5)
+        ttk.Label(self, text="Bust:").pack(side="left", padx=2)  # Shorter text
+        self.bust_prob_label = ttk.Label(self, text="0%", width=3, relief="sunken")  # Narrower
+        self.bust_prob_label.pack(side="left", padx=2)  # Reduced padding
     
     def update_counts(self, running_count, true_count, bust_probability):
         """Update the count displays."""
@@ -218,8 +266,8 @@ class BlackjackGUI:
             root: The Tkinter root window
         """
         self.root = root
-        self.root.title("Blackjack Assistant - Strategy Mode")
-        self.root.geometry("1200x800")
+        self.root.title("Blackjack Assistant - Enhanced Strategy")
+        self.root.geometry("1000x700")  # Smaller default size
         self.root.resizable(True, True)
         
         # Store reference to GUI in root for access from DraggableCard
@@ -227,12 +275,12 @@ class BlackjackGUI:
         
         # Set theme and style
         self.style = ttk.Style()
-        self.style.configure("TButton", padding=6, relief="flat")
-        self.style.configure("TLabel", padding=6)
-        self.style.configure("TFrame", padding=6)
+        self.style.configure("TButton", padding=3)  # Reduced padding
+        self.style.configure("TLabel", padding=3)   # Reduced padding
+        self.style.configure("TFrame", padding=2)   # Reduced padding
         
-        # Define card ranks (J, Q, K are treated as 10)
-        self.ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "A"]
+        # Define card ranks (J, Q, K are value 10 but tracked separately)
+        self.ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
         
         # Variables
         self.num_decks = tk.IntVar(value=1)
@@ -240,11 +288,52 @@ class BlackjackGUI:
         # Card counts dictionary to track remaining cards
         self.card_counts = {}
         
-        # Voice recognition variables
-        self.recognizer = sr.Recognizer()
+        # Initialize speech recognition
         self.is_listening = False
-        self.current_voice_target = None
-        self.current_voice_button = None
+        self.active_target = None
+        self.listen_thread = None
+        self.audio_queue = queue.Queue()
+        
+        # Initialize Vosk model
+        try:
+            model_path = "vosk-model-small-en-us-0.15"
+            if not os.path.exists(model_path):
+                self.update_status("Downloading Vosk model...")
+                import urllib.request
+                import zipfile
+                import io
+                
+                url = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+                response = urllib.request.urlopen(url)
+                with zipfile.ZipFile(io.BytesIO(response.read())) as zip_ref:
+                    zip_ref.extractall(".")
+                
+            self.model = vosk.Model(model_path)
+            self.update_status("Vosk model loaded successfully")
+        except Exception as e:
+            self.update_status(f"Error loading Vosk model: {str(e)}")
+            self.model = None
+        
+        # Card number mapping with fuzzy matching
+        self.card_numbers = {
+            'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5',
+            'six': '6', 'seven': '7', 'eight': '8', 'nine': '9', 'ten': '10',
+            'ace': 'A', 'king': 'K', 'queen': 'Q', 'jack': 'J',
+            'first': 'A'  # Add "first" as a clear alternative for "ace"
+        }
+        
+        # Alternative pronunciations with similarity scores
+        self.card_alternatives = {
+            'for': ('4', 0.8), 'tree': ('3', 0.9), 'free': ('3', 0.8),
+            'too': ('2', 0.9), 'to': ('2', 0.8), 'won': ('1', 0.9),
+            'ate': ('8', 0.9), 'sicks': ('6', 0.8), 'sex': ('6', 0.7),
+            'heaven': ('7', 0.7), 'tin': ('10', 0.8), 'tan': ('10', 0.8),
+            'is': ('A', 0.8), 'hey': ('A', 0.7), 'aids': ('A', 0.7),
+            'space': ('A', 0.9), 'base': ('A', 0.8), 'case': ('A', 0.8),
+            'face': ('A', 0.9), 'place': ('A', 0.8), 'number one': ('A', 0.95),
+            'as': ('A', 0.8), 'first card': ('A', 0.95), 'one card': ('A', 0.9),
+            'check': ('J', 0.8), 'queen': ('Q', 0.9), 'king': ('K', 0.9)
+        }
         
         # Create main layout frames
         self.create_layout()
@@ -275,36 +364,36 @@ class BlackjackGUI:
     def create_settings_panel(self):
         """Create the panel for game settings."""
         panel = ttk.Frame(self.root)
-        panel.pack(fill="x", padx=10, pady=5)
+        panel.pack(fill="x", padx=5, pady=2)  # Reduced padding
         
         # Left frame for game controls
         left_frame = ttk.Frame(panel)
         left_frame.pack(side="left", fill="x", expand=True)
         
         # Deck configuration
-        ttk.Label(left_frame, text="Number of decks:").pack(side="left", padx=5)
-        deck_spinner = ttk.Spinbox(left_frame, from_=1, to=8, width=5, textvariable=self.num_decks)
-        deck_spinner.pack(side="left", padx=5)
+        ttk.Label(left_frame, text="Decks:").pack(side="left", padx=2)  # Shorter label
+        deck_spinner = ttk.Spinbox(left_frame, from_=1, to=8, width=3, textvariable=self.num_decks)  # Narrower
+        deck_spinner.pack(side="left", padx=2)  # Reduced padding
         
-        ttk.Button(left_frame, text="Set Decks", command=self.set_decks).pack(side="left", padx=5)
-        ttk.Button(left_frame, text="Reset Game", command=self.reset_game).pack(side="left", padx=5)
-        ttk.Button(left_frame, text="Get Recommendation", command=self.get_recommendation).pack(side="left", padx=20)
-        ttk.Button(left_frame, text="Next Hand", command=self.next_hand).pack(side="left", padx=5)
+        ttk.Button(left_frame, text="Set", command=self.set_decks, width=4).pack(side="left", padx=2)  # Shorter text
+        ttk.Button(left_frame, text="Reset", command=self.reset_game, width=5).pack(side="left", padx=2)  # Shorter text
+        ttk.Button(left_frame, text="Recommend", command=self.get_recommendation, width=10).pack(side="left", padx=2)  # Shorter text
+        ttk.Button(left_frame, text="Next", command=self.next_hand, width=5).pack(side="left", padx=2)  # Shorter text
         
         # Right frame for voice recognition status
         right_frame = ttk.Frame(panel)
-        right_frame.pack(side="right", fill="x", padx=10)
+        right_frame.pack(side="right", fill="x", padx=5)
         
         # Voice recognition status
-        self.voice_status_label = ttk.Label(right_frame, text="Voice Recognition: Click 🎤 buttons to use")
-        self.voice_status_label.pack(side="right", padx=5)
+        self.voice_status_label = ttk.Label(right_frame, text="Voice: Click 🎤")  # Shorter text
+        self.voice_status_label.pack(side="right", padx=2)
         
         # Create a tooltip for voice usage
         self.create_tooltip(self.voice_status_label, 
                           "To use voice recognition:\n"
-                          "1. Click the 🎤 button next to dealer, player, or wasted cards\n"
+                          "1. Click 🎤 next to dealer, player, or wasted cards\n"
                           "2. Say a card value (e.g., 'two', 'ace', etc.)\n"
-                          "3. The card will be added to the selected area")
+                          "3. The card will be added to selected area")
     
     def create_tooltip(self, widget, text):
         """Create a tooltip for a given widget."""
@@ -327,11 +416,11 @@ class BlackjackGUI:
     def create_workspace(self):
         """Create the main workspace with drop targets and card source."""
         workspace = ttk.Frame(self.root)
-        workspace.pack(fill="both", padx=10, pady=5, expand=True)
+        workspace.pack(fill="both", padx=5, pady=2, expand=True)  # Reduced padding
         
         # Create split panes
         paned_window = ttk.PanedWindow(workspace, orient=tk.HORIZONTAL)
-        paned_window.pack(fill="both", expand=True, padx=5, pady=5)
+        paned_window.pack(fill="both", expand=True, padx=2, pady=2)  # Reduced padding
         
         # Create left panel for card source and recommendation
         left_panel = ttk.Frame(paned_window)
@@ -346,35 +435,35 @@ class BlackjackGUI:
         
         # Create recommendation panel in left panel
         recommendation_frame = ttk.LabelFrame(left_panel, text="Recommendation")
-        recommendation_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        recommendation_frame.pack(fill="both", expand=True, padx=2, pady=2)  # Reduced padding
         
-        # Text area for recommendation display with normal size
-        self.recommendation_text = scrolledtext.ScrolledText(recommendation_frame, height=6, width=80, wrap=tk.WORD, 
-                                                          font=("Arial", 10))
-        self.recommendation_text.pack(fill="both", expand=True, padx=5, pady=5)
-        self.recommendation_text.insert(tk.END, "Recommendation will appear here when you add cards to your hand and the dealer's hand, then click 'Get Recommendation'.")
+        # Text area for recommendation display with smaller size
+        self.recommendation_text = scrolledtext.ScrolledText(recommendation_frame, height=4, width=70, wrap=tk.WORD, 
+                                                          font=("Arial", 9))  # Smaller font and height
+        self.recommendation_text.pack(fill="both", expand=True, padx=2, pady=2)  # Reduced padding
+        self.recommendation_text.insert(tk.END, "Recommendation will appear here when you add cards.")
         self.recommendation_text.config(state="disabled")
         
         # Create card count display
         self.count_display = CardCountDisplay(left_panel)
-        self.count_display.pack(fill="both", expand=True, padx=5, pady=5)
+        self.count_display.pack(fill="both", expand=True, padx=2, pady=2)  # Reduced padding
         
-        # Create drop targets in right panel
-        self.dealer_drop_target = DropTarget(right_panel, "dealer", "Dealer's Hand (Drop Cards Here)", 
-                                           width=400, height=150)
-        self.dealer_drop_target.pack(side="top", fill="x", padx=5, pady=5)
+        # Create drop targets in right panel with smaller dimensions
+        self.dealer_drop_target = DropTarget(right_panel, "dealer", "Dealer's Hand", 
+                                           width=380, height=100)  # Smaller dimensions, shorter text
+        self.dealer_drop_target.pack(side="top", fill="x", padx=2, pady=2)  # Reduced padding
         
         # Create a frame for player and dealt cards side by side
         card_areas = ttk.Frame(right_panel)
-        card_areas.pack(fill="both", expand=True, padx=5, pady=5)
+        card_areas.pack(fill="both", expand=True, padx=2, pady=2)  # Reduced padding
         
-        self.player_drop_target = DropTarget(card_areas, "player", "Your Hand (Drop Cards Here)", 
-                                           width=200, height=150)
-        self.player_drop_target.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.player_drop_target = DropTarget(card_areas, "player", "Your Hand", 
+                                           width=180, height=130)  # Smaller dimensions, shorter text
+        self.player_drop_target.pack(side="left", fill="both", expand=True, padx=2, pady=2)  # Reduced padding
         
-        self.dealt_drop_target = DropTarget(card_areas, "dealt", "Dealt/Wasted Cards (Drop Cards Here)", 
-                                          width=200, height=150)
-        self.dealt_drop_target.pack(side="right", fill="both", expand=True, padx=5, pady=5)
+        self.dealt_drop_target = DropTarget(card_areas, "dealt", "Wasted Cards", 
+                                          width=180, height=130)  # Smaller dimensions, shorter text
+        self.dealt_drop_target.pack(side="right", fill="both", expand=True, padx=2, pady=2)  # Reduced padding
     
     def create_card_source_panel(self, parent):
         """
@@ -383,38 +472,38 @@ class BlackjackGUI:
         Args:
             parent: The parent widget
         """
-        card_source = ttk.LabelFrame(parent, text="Available Cards (Click to Add)")
-        card_source.pack(fill="x", padx=5, pady=5)
+        card_source = ttk.LabelFrame(parent, text="Available Cards")  # Shorter text
+        card_source.pack(fill="x", padx=2, pady=2)  # Reduced padding
         
         # Create a frame for the three columns
         columns_frame = ttk.Frame(card_source)
-        columns_frame.pack(fill="both", padx=5, pady=5)
+        columns_frame.pack(fill="both", padx=2, pady=2)  # Reduced padding
         
         # Create three columns
-        dealer_column = ttk.LabelFrame(columns_frame, text="Dealer Cards")
-        dealer_column.pack(side="left", fill="both", expand=True, padx=5)
+        dealer_column = ttk.LabelFrame(columns_frame, text="Dealer")  # Shorter text
+        dealer_column.pack(side="left", fill="both", expand=True, padx=2)  # Reduced padding
         
-        player_column = ttk.LabelFrame(columns_frame, text="Player Cards")
-        player_column.pack(side="left", fill="both", expand=True, padx=5)
+        player_column = ttk.LabelFrame(columns_frame, text="Player")  # Shorter text
+        player_column.pack(side="left", fill="both", expand=True, padx=2)  # Reduced padding
         
-        wasted_column = ttk.LabelFrame(columns_frame, text="Wasted Cards")
-        wasted_column.pack(side="left", fill="both", expand=True, padx=5)
+        wasted_column = ttk.LabelFrame(columns_frame, text="Wasted")  # Shorter text
+        wasted_column.pack(side="left", fill="both", expand=True, padx=2)  # Reduced padding
         
-        # Create cards in each column
+        # Create cards in each column with reduced spacing
         for rank_idx, rank in enumerate(self.ranks):
             # Dealer column
             dealer_card = ttk.Label(dealer_column, text=rank, relief="raised", borderwidth=1)
-            dealer_card.grid(row=rank_idx, column=0, padx=2, pady=2)
+            dealer_card.grid(row=rank_idx, column=0, padx=1, pady=1)  # Reduced padding
             dealer_card.bind("<Button-1>", lambda e, r=rank: self.set_dealer_card(r))
             
             # Player column
             player_card = ttk.Label(player_column, text=rank, relief="raised", borderwidth=1)
-            player_card.grid(row=rank_idx, column=0, padx=2, pady=2)
+            player_card.grid(row=rank_idx, column=0, padx=1, pady=1)  # Reduced padding
             player_card.bind("<Button-1>", lambda e, r=rank: self.add_to_player_hand(r))
             
             # Wasted column
             wasted_card = ttk.Label(wasted_column, text=rank, relief="raised", borderwidth=1)
-            wasted_card.grid(row=rank_idx, column=0, padx=2, pady=2)
+            wasted_card.grid(row=rank_idx, column=0, padx=1, pady=1)  # Reduced padding
             wasted_card.bind("<Button-1>", lambda e, r=rank: self.add_to_dealt_cards(r))
     
     def create_recommendation_panel(self):
@@ -425,29 +514,29 @@ class BlackjackGUI:
     def create_card_tracking_panel(self):
         """Create the panel for tracking cards and counts."""
         panel = ttk.Frame(self.root)
-        panel.pack(fill="x", padx=10, pady=5)
+        panel.pack(fill="x", padx=5, pady=2)  # Reduced padding
         
         # Create a frame for running count and true count
         counts_frame = ttk.LabelFrame(panel, text="Card Counting")
-        counts_frame.pack(fill="x", padx=5, pady=5)
+        counts_frame.pack(fill="x", padx=2, pady=2)  # Reduced padding
         
         count_info = ttk.Frame(counts_frame)
-        count_info.pack(fill="x", padx=5, pady=5)
+        count_info.pack(fill="x", padx=2, pady=2)  # Reduced padding
         
-        ttk.Label(count_info, text="Running Count:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
-        self.running_count_label = ttk.Label(count_info, text="0", width=5, 
+        ttk.Label(count_info, text="Run Count:").grid(row=0, column=0, padx=2, pady=1, sticky="w")  # Shorter text
+        self.running_count_label = ttk.Label(count_info, text="0", width=4, 
                                            background="white", relief="sunken")
-        self.running_count_label.grid(row=0, column=1, padx=5, pady=2)
+        self.running_count_label.grid(row=0, column=1, padx=2, pady=1)  # Reduced padding
         
-        ttk.Label(count_info, text="True Count:").grid(row=0, column=2, padx=20, pady=2, sticky="w")
-        self.true_count_label = ttk.Label(count_info, text="0.0", width=5, 
+        ttk.Label(count_info, text="True Count:").grid(row=0, column=2, padx=10, pady=1, sticky="w")  # Shorter text
+        self.true_count_label = ttk.Label(count_info, text="0.0", width=4, 
                                         background="white", relief="sunken")
-        self.true_count_label.grid(row=0, column=3, padx=5, pady=2)
+        self.true_count_label.grid(row=0, column=3, padx=2, pady=1)  # Reduced padding
         
-        ttk.Label(count_info, text="Bust Probability:").grid(row=0, column=4, padx=20, pady=2, sticky="w")
-        self.bust_prob_label = ttk.Label(count_info, text="0%", width=5, 
+        ttk.Label(count_info, text="Bust Prob:").grid(row=0, column=4, padx=10, pady=1, sticky="w")  # Shorter text
+        self.bust_prob_label = ttk.Label(count_info, text="0%", width=4, 
                                         background="white", relief="sunken")
-        self.bust_prob_label.grid(row=0, column=5, padx=5, pady=2)
+        self.bust_prob_label.grid(row=0, column=5, padx=2, pady=1)  # Reduced padding
     
     def set_game_and_strategies(self, game, basic_strategy, counting_strategy):
         """
@@ -480,10 +569,15 @@ class BlackjackGUI:
         deck_count = self.num_decks.get()
         for rank in self.ranks:
             if rank == "10":
-                # For 10, count includes J, Q, K (4 cards per suit)
-                self.card_counts[rank] = deck_count * 16  # 4 cards × 4 suits
+                # For 10, we count just the numeric 10 cards (not face cards)
+                self.card_counts[rank] = deck_count * 4  # 1 card × 4 suits
             else:
                 self.card_counts[rank] = deck_count * 4  # 1 card × 4 suits
+        
+        # Add face cards (J, Q, K) - each has 4 cards per deck
+        self.card_counts["J"] = deck_count * 4
+        self.card_counts["Q"] = deck_count * 4
+        self.card_counts["K"] = deck_count * 4
         
         # Initialize display
         self.update_card_count_display()
@@ -530,7 +624,7 @@ class BlackjackGUI:
         # Reset recommendation
         self.recommendation_text.config(state="normal")
         self.recommendation_text.delete(1.0, tk.END)
-        self.recommendation_text.insert(tk.END, "Recommendation will appear here when you add cards to your hand and the dealer's hand, then click 'Get Recommendation'.")
+        self.recommendation_text.insert(tk.END, "Recommendation will appear here when you add cards.")
         self.recommendation_text.config(state="disabled")
         
         # Reset count displays
@@ -642,9 +736,8 @@ class BlackjackGUI:
                 # Add card to game
                 self.game.add_dealt_card(rank + "S")  # Add dummy suit since game logic requires it
                 
-                # Create visual card
-                card = DraggableCard(self.dealt_drop_target.cards_frame, rank, self)
-                card.pack(side="left", padx=2, pady=2)
+                # Add to the DropTarget's cards list and update display
+                self.dealt_drop_target.add_card(rank)
                 
                 # Update counts
                 self.update_counts()
@@ -786,9 +879,8 @@ class BlackjackGUI:
             # Add card to dealt cards
             self.game.add_dealt_card(dealer_rank + "S")  # Add dummy suit since game logic requires it
             
-            # Create visual card in dealt area
-            card = DraggableCard(self.dealt_drop_target.cards_frame, dealer_rank, self)
-            card.pack(side="left", padx=2, pady=2)
+            # Add to the wasted cards display
+            self.dealt_drop_target.add_card(dealer_rank)
         
         # Move player's cards to dealt cards
         for player_card in self.game.player_hand:
@@ -798,26 +890,23 @@ class BlackjackGUI:
             # Add card to dealt cards
             self.game.add_dealt_card(rank + "S")  # Add dummy suit since game logic requires it
             
-            # Create visual card in dealt area
-            card = DraggableCard(self.dealt_drop_target.cards_frame, rank, self)
-            card.pack(side="left", padx=2, pady=2)
+            # Add to the wasted cards display
+            self.dealt_drop_target.add_card(rank)
         
         # Reset player and dealer cards in game
         self.game.player_hand = []
         self.game.dealer_upcard = None
         
         # Clear dealer display
-        for widget in self.dealer_drop_target.cards_frame.winfo_children():
-            widget.destroy()
+        self.dealer_drop_target.clear()
         
         # Clear player display
-        for widget in self.player_drop_target.cards_frame.winfo_children():
-            widget.destroy()
+        self.player_drop_target.clear()
         
         # Reset recommendation
         self.recommendation_text.config(state="normal")
         self.recommendation_text.delete(1.0, tk.END)
-        self.recommendation_text.insert(tk.END, "Recommendation will appear here when you add cards to your hand and the dealer's hand, then click 'Get Recommendation'.")
+        self.recommendation_text.insert(tk.END, "Recommendation will appear here when you add cards.")
         self.recommendation_text.config(state="disabled")
         
         # Update card counts
@@ -825,10 +914,10 @@ class BlackjackGUI:
     
     def reset_target_labels(self):
         """Reset the labels of all drop targets after voice recognition is done."""
-        self.dealer_drop_target.label.config(text="Dealer's Hand (Drop Cards Here)", foreground="black")
-        self.player_drop_target.label.config(text="Your Hand (Drop Cards Here)", foreground="black")
-        self.dealt_drop_target.label.config(text="Dealt/Wasted Cards (Drop Cards Here)", foreground="black")
-        self.voice_status_label.config(text="Voice Recognition: Click 🎤 buttons to use", foreground="black")
+        self.dealer_drop_target.label.config(text="Dealer's Hand", foreground="black")
+        self.player_drop_target.label.config(text="Your Hand", foreground="black")
+        self.dealt_drop_target.label.config(text="Wasted Cards", foreground="black")
+        self.voice_status_label.config(text="Voice: Click 🎤", foreground="black")
         
         # Reset button appearance
         if hasattr(self, 'current_voice_button') and self.current_voice_button:
@@ -836,146 +925,162 @@ class BlackjackGUI:
             self.current_voice_button = None
     
     def toggle_voice_recognition(self, target_type, button):
-        """
-        Toggle voice recognition for a specific target.
-        
-        Args:
-            target_type: The type of target ('dealer', 'player', or 'dealt')
-            button: The voice button associated with the target
-        """
-        if self.is_listening:
-            # Already listening, stop current session
-            self.is_listening = False
-            if hasattr(self, 'current_voice_button') and self.current_voice_button:
-                self.current_voice_button.config(text="🎤")
-            self.reset_target_labels()
+        """Toggle voice recognition on/off."""
+        if not self.is_listening:
+            self.start_listening(target_type, button)
+        else:
+            self.stop_listening(button)
+
+    def start_listening(self, target_type, button):
+        """Start continuous voice recognition using Vosk."""
+        if not self.model:
+            self.update_status("Error: Vosk model not loaded")
             return
             
-        self.current_voice_target = target_type
-        self.current_voice_button = button
         self.is_listening = True
+        self.active_target = target_type
+        button.configure(text="⏹️", style="Listening.TButton")
         
-        # Update status label
-        target_name = "Dealer" if target_type == "dealer" else "Player" if target_type == "player" else "Wasted Cards"
-        self.voice_status_label.config(text=f"Voice Recognition: Listening for {target_name}...", foreground="red")
+        # Create and start listening thread
+        self.listen_thread = threading.Thread(target=self.continuous_listen)
+        self.listen_thread.daemon = True
+        self.listen_thread.start()
         
-        # Show visual indicator that voice recognition is active
-        if target_type == "dealer":
-            self.dealer_drop_target.label.config(text="Dealer's Hand (Listening...)", foreground="red")
-        elif target_type == "player":
-            self.player_drop_target.label.config(text="Your Hand (Listening...)", foreground="red")
-        else:  # dealt
-            self.dealt_drop_target.label.config(text="Dealt/Wasted Cards (Listening...)", foreground="red")
-        
-        # Change button appearance
-        button.config(text="⏹️")
-        
-        # Start voice recognition in a separate thread
-        threading.Thread(target=self.listen_for_voice_commands, daemon=True).start()
-    
-    def listen_for_voice_commands(self):
-        """Listen for voice commands and process them."""
+        # Update status
+        self.update_status("Listening for cards... (Say 'stop' to end)")
+
+    def stop_listening(self, button):
+        """Stop voice recognition."""
+        self.is_listening = False
+        self.active_target = None
+        button.configure(text="🎤", style="TButton")
+        self.voice_status_label.config(text="Voice recognition stopped")
+
+    def continuous_listen(self):
+        """Continuously listen for card commands using Vosk."""
         try:
-            with sr.Microphone() as source:
-                # Update status and show indicator that we're adjusting for ambient noise
-                self.root.after(0, lambda: self.voice_status_label.config(
-                    text="Voice Recognition: Adjusting for ambient noise...", foreground="blue"))
-                
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                
-                # Update status to show we're ready to listen
-                target_name = "Dealer" if self.current_voice_target == "dealer" else "Player" if self.current_voice_target == "player" else "Wasted Cards"
-                self.root.after(0, lambda: self.voice_status_label.config(
-                    text=f"Voice Recognition: Listening for {target_name}...", foreground="red"))
+            # Audio parameters
+            sample_rate = 16000
+            channels = 1
+            dtype = np.int16
+            
+            def audio_callback(indata, frames, time, status):
+                if status:
+                    print(f"Status: {status}")
+                self.audio_queue.put(indata.copy())
+            
+            with sd.InputStream(samplerate=sample_rate, channels=channels, dtype=dtype, callback=audio_callback):
+                rec = vosk.KaldiRecognizer(self.model, sample_rate)
                 
                 while self.is_listening:
                     try:
-                        audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=3)
+                        # Get audio data from queue
+                        audio_data = self.audio_queue.get()
                         
-                        # Show that we're processing speech
-                        self.root.after(0, lambda: self.voice_status_label.config(
-                            text="Voice Recognition: Processing speech...", foreground="orange"))
-                        
-                        text = self.recognizer.recognize_google(audio).lower()
-                        print(f"Recognized: '{text}'")  # Debug output
-                        
-                        # Process the recognized text
-                        success = self.process_voice_command(text)
-                        
-                        # Only stop listening if we successfully processed a command
-                        if success:
-                            self.is_listening = False
-                            self.root.after(1000, self.reset_target_labels)  # Reset after 1 second to show feedback
-                        
-                    except sr.WaitTimeoutError:
-                        # No speech detected within timeout
-                        continue
-                    except sr.UnknownValueError:
-                        # Speech was unintelligible
-                        self.root.after(0, lambda: self.voice_status_label.config(
-                            text="Voice Recognition: Didn't understand, try again...", foreground="orange"))
-                        continue
+                        # Process audio with Vosk
+                        if rec.AcceptWaveform(audio_data.tobytes()):
+                            result = json.loads(rec.Result())
+                            text = result.get("text", "").lower()
+                            
+                            # Check for stop command
+                            if 'stop' in text:
+                                self.root.after(0, self.stop_listening, self.find_active_button())
+                                break
+                            
+                            # Process multiple cards in one phrase
+                            words = text.split()
+                            for word in words:
+                                card = self.process_card_word(word)
+                                if card:
+                                    self.root.after(0, self.add_card_from_voice, card)
+                                    self.root.after(0, self.update_status, f"Added card: {card}")
+                    
                     except Exception as e:
-                        print(f"Error in voice recognition: {e}")
-                        self.is_listening = False
-                        self.root.after(0, lambda: self.reset_target_labels())
+                        print(f"Error in audio processing: {e}")
+                        continue
                         
         except Exception as e:
-            print(f"Error initializing microphone: {e}")
-            self.is_listening = False
-            # Show error in status
-            self.root.after(0, lambda: self.voice_status_label.config(
-                text=f"Voice Recognition Error: {str(e)[:30]}...", foreground="red"))
-            self.root.after(2000, self.reset_target_labels)  # Reset after 2 seconds
-    
-    def process_voice_command(self, text):
-        """
-        Process a voice command.
+            self.root.after(0, self.update_status, f"Error: {str(e)}")
+            self.root.after(0, self.stop_listening, self.find_active_button())
+
+    def process_card_word(self, word):
+        """Process a word to determine if it's a valid card value using fuzzy matching."""
+        word = word.lower().strip()
         
-        Args:
-            text: The recognized text from the voice command
-        """
-        # Map spoken words to card ranks
-        card_mappings = {
-            "two": "2", "2": "2", "to": "2", "too": "2",
-            "three": "3", "3": "3", "tree": "3",
-            "four": "4", "4": "4", "for": "4",
-            "five": "5", "5": "5",
-            "six": "6", "6": "6",
-            "seven": "7", "7": "7",
-            "eight": "8", "8": "8", "ate": "8",
-            "nine": "9", "9": "9",
-            "ten": "10", "10": "10",
-            "jack": "10", "queen": "10", "king": "10",  # Face cards count as 10
-            "ace": "A", "a": "A", "as": "A", "aces": "A"
-        }
-        
-        # Find the matching card rank
-        card_rank = None
-        for word, rank in card_mappings.items():
-            if word in text:
-                card_rank = rank
-                break
-        
-        if card_rank:
-            # Show feedback that we recognized a card
-            target_name = "Dealer" if self.current_voice_target == "dealer" else "Player" if self.current_voice_target == "player" else "Wasted Cards"
-            self.root.after(0, lambda: self.voice_status_label.config(
-                text=f"Voice Recognition: Adding {card_rank} to {target_name}", foreground="green"))
+        # Check direct matches
+        if word in self.card_numbers:
+            return self.card_numbers[word]
             
-            # Use the GUI thread to update the UI
-            if self.current_voice_target == "dealer":
-                self.root.after(0, lambda: self.set_dealer_card(card_rank))
-            elif self.current_voice_target == "player":
-                self.root.after(0, lambda: self.add_to_player_hand(card_rank))
-            else:  # dealt
-                self.root.after(0, lambda: self.add_to_dealt_cards(card_rank))
-        else:
-            # No card recognized
-            self.root.after(0, lambda: self.voice_status_label.config(
-                text="Voice Recognition: No valid card recognized, try again", foreground="orange"))
-            # Keep listening
-            return False
+        # Check alternative pronunciations with similarity scores
+        best_match = None
+        best_score = 0
         
-        # Successfully processed a command
-        return True 
+        for alt, (card, score) in self.card_alternatives.items():
+            # Calculate Levenshtein distance
+            distance = self.levenshtein_distance(word, alt)
+            similarity = 1 - (distance / max(len(word), len(alt)))
+            
+            # Combine with predefined similarity score
+            combined_score = (similarity + score) / 2
+            
+            if combined_score > best_score and combined_score > 0.6:  # Threshold for matching
+                best_score = combined_score
+                best_match = card
+        
+        if best_match:
+            return best_match
+            
+        # Check if the word is already a valid card value
+        if word in ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'a', 'j', 'q', 'k']:
+            return word.upper()
+            
+        return None
+
+    def levenshtein_distance(self, s1, s2):
+        """Calculate the Levenshtein distance between two strings."""
+        if len(s1) < len(s2):
+            return self.levenshtein_distance(s2, s1)
+        
+        if len(s2) == 0:
+            return len(s1)
+        
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        
+        return previous_row[-1]
+
+    def add_card_from_voice(self, card):
+        """Add a card based on voice recognition."""
+        try:
+            if self.active_target == "dealer":
+                self.set_dealer_card(card)
+            elif self.active_target == "player":
+                self.add_to_player_hand(card)
+            elif self.active_target == "dealt":
+                self.add_to_dealt_cards(card)
+        except Exception as e:
+            self.update_status(f"Error adding card: {str(e)}")
+
+    def update_status(self, message):
+        """Update the status label."""
+        if hasattr(self, 'status_label'):
+            self.status_label.configure(text=message)
+        else:
+            print(f"Status: {message}")  # Fallback to console output
+
+    def find_active_button(self):
+        """Find the currently active voice button."""
+        if self.active_target == "dealer":
+            return self.dealer_drop_target.voice_button
+        elif self.active_target == "player":
+            return self.player_drop_target.voice_button
+        elif self.active_target == "dealt":
+            return self.dealt_drop_target.voice_button
+        return None 
